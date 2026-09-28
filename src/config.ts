@@ -10,15 +10,13 @@ export type AppConfig = {
 		webhookSecret?: string;
 		replyToAuthor: boolean;
 	};
-	discord: {
-		streamOnlineWebhookUrl?: string;
-		postsWebhookUrl?: string;
-	};
+	// Twitch опционален: без этих переменных бот постит в канал как обычно,
+	// а уведомления о начале стрима просто выключены.
 	twitch: {
-		clientId: string;
-		clientSecret: string;
-		broadcasterUserId: string;
-		eventSubSecret: string;
+		clientId?: string;
+		clientSecret?: string;
+		broadcasterUserId?: string;
+		eventSubSecret?: string;
 	};
 	baseUrl: string;
 	buttons: Button[];
@@ -53,11 +51,16 @@ function parseUserIds(raw: string | undefined): number[] {
 		.filter((id) => Number.isFinite(id));
 }
 
+/** Переменная, которая может быть не задана: пустая строка и пробелы — это undefined. */
+function optionalEnv(name: string): string | undefined {
+	return process.env[name]?.trim() || undefined;
+}
+
 const buttons: Button[] = [
-	{ label: "Twitch", url: "https://www.twitch.tv/ku6epxboctuk" },
-	{ label: "Чатик", url: "https://t.me/Ku6epXBOCTuK_chat" },
-	{ label: "GitHub", url: "https://github.com/Ku6epXBOCTuK" },
-	{ label: "Мой сайт", url: "https://ku6epxboctuk.is-a.dev/" },
+	{ label: "Twitch", url: "https://www.twitch.tv/Sapushka_" },
+	{ label: "Vk Video live", url: "https://live.vkvideo.ru/sapushka_" },
+	{ label: "Youtube", url: "https://www.youtube.com/@sapa_sapushka" },
+	{ label: "Чат в телеге", url: "https://t.me/Sapushka_chat" },
 ];
 
 function buildConfig(): AppConfig {
@@ -71,17 +74,11 @@ function buildConfig(): AppConfig {
 			webhookSecret: process.env.TELEGRAM_WEBHOOK_SECRET,
 			replyToAuthor: process.env.REPLY_TO_AUTHOR !== "false",
 		},
-		discord: {
-			streamOnlineWebhookUrl:
-				process.env.DISCORD_STREAM_ONLINE_WEBHOOK_URL?.trim() || undefined,
-			postsWebhookUrl:
-				process.env.DISCORD_POSTS_WEBHOOK_URL?.trim() || undefined,
-		},
 		twitch: {
-			clientId: requiredEnv("TWITCH_CLIENT_ID"),
-			clientSecret: requiredEnv("TWITCH_CLIENT_SECRET"),
-			broadcasterUserId: requiredEnv("TWITCH_BROADCASTER_USER_ID"),
-			eventSubSecret: requiredEnv("EVENTSUB_SECRET"),
+			clientId: optionalEnv("TWITCH_CLIENT_ID"),
+			clientSecret: optionalEnv("TWITCH_CLIENT_SECRET"),
+			broadcasterUserId: optionalEnv("TWITCH_BROADCASTER_USER_ID"),
+			eventSubSecret: optionalEnv("EVENTSUB_SECRET"),
 		},
 		baseUrl,
 		buttons,

@@ -53,12 +53,9 @@ export async function GET(): Promise<Response> {
 			telegramTokenSet: Boolean(appConfig.telegram.token),
 			channelId: appConfig.telegram.channelId,
 			baseUrl: appConfig.baseUrl,
-			discordStreamOnlineWebhookSet: Boolean(
-				appConfig.discord.streamOnlineWebhookUrl,
-			),
-			discordPostsWebhookSet: Boolean(appConfig.discord.postsWebhookUrl),
-			twitchClientIdSet: Boolean(appConfig.twitch.clientId),
-			broadcasterUserId: appConfig.twitch.broadcasterUserId,
+			twitchConfigured: twitch.twitchConfigured(),
+			twitchMissingEnv: twitch.missingTwitchEnv(),
+			broadcasterUserId: appConfig.twitch.broadcasterUserId ?? null,
 		},
 		telegramWebhook: null as unknown,
 		subscription: null as unknown,
@@ -72,13 +69,19 @@ export async function GET(): Promise<Response> {
 		status.telegramWebhook = { error: errorMessage(err) };
 	}
 
-	try {
-		const sub = await twitch.getEventSubStatus();
-		status.subscription = sub
-			? { id: sub.id, type: sub.type, status: sub.status }
-			: null;
-	} catch (err) {
-		status.subscription = { error: errorMessage(err) };
+	// Подписка спрашивается только при полном наборе Twitch-кредов: иначе
+	// запрос к Twitch всё равно упал бы, а setup должен оставаться диагностикой.
+	if (twitch.twitchConfigured()) {
+		try {
+			const sub = await twitch.getEventSubStatus();
+			status.subscription = sub
+				? { id: sub.id, type: sub.type, status: sub.status }
+				: null;
+		} catch (err) {
+			status.subscription = { error: errorMessage(err) };
+		}
+	} else {
+		status.subscription = { skipped: "Twitch не настроен" };
 	}
 
 	return Response.json(status);
@@ -93,11 +96,17 @@ export async function POST(): Promise<Response> {
 		return jsonError(err);
 	}
 
+	// Webhook Telegram настраивается всегда, подписка Twitch — только если
+	// есть креды. Иначе один POST /api/setup падал бы из-за неиспользуемой части.
 	const [webhookResult, subscriptionResult] = await Promise.all([
 		setTelegramWebhook(appConfig).catch((err) => ({
 			error: errorMessage(err),
 		})),
-		twitch.subscribeIfNeeded().catch((err) => ({ error: errorMessage(err) })),
+		twitch.twitchConfigured()
+			? twitch
+					.subscribeIfNeeded()
+					.catch((err) => ({ error: errorMessage(err) }))
+			: Promise.resolve({ skipped: "Twitch не настроен" }),
 	]);
 	return Response.json({
 		webhook: webhookResult,

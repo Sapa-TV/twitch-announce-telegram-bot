@@ -3,15 +3,63 @@ import { ApiClient } from "@twurple/api";
 import { AppTokenAuthProvider } from "@twurple/auth";
 import { getConfig } from "./config.js";
 
+/** Имена переменных, без которых подписка stream.online работать не будет. */
+const TWITCH_ENV_NAMES = [
+	"TWITCH_CLIENT_ID",
+	"TWITCH_CLIENT_SECRET",
+	"TWITCH_BROADCASTER_USER_ID",
+	"EVENTSUB_SECRET",
+] as const;
+
 let client: ApiClient | null = null;
+
+/** Какие из Twitch-переменных не заданы (пусто — настроен полностью). */
+export function missingTwitchEnv(): string[] {
+	const twitch = getConfig().twitch;
+	const values: Record<(typeof TWITCH_ENV_NAMES)[number], string | undefined> =
+		{
+			TWITCH_CLIENT_ID: twitch.clientId,
+			TWITCH_CLIENT_SECRET: twitch.clientSecret,
+			TWITCH_BROADCASTER_USER_ID: twitch.broadcasterUserId,
+			EVENTSUB_SECRET: twitch.eventSubSecret,
+		};
+	return TWITCH_ENV_NAMES.filter((name) => !values[name]);
+}
+
+export function twitchConfigured(): boolean {
+	return missingTwitchEnv().length === 0;
+}
+
+/**
+ * Конфиг Twitch, из которого можно строить клиент и подписку. Если часть
+ * переменных не задана, бросаем понятную ошибку вместо обращения к Twitch с
+ * пустыми креды.
+ */
+function requireTwitchConfig(): {
+	clientId: string;
+	clientSecret: string;
+	broadcasterUserId: string;
+	eventSubSecret: string;
+} {
+	const twitch = getConfig().twitch;
+	const missing = missingTwitchEnv();
+	if (missing.length > 0) {
+		throw new Error(
+			`Twitch не настроен: не заданы переменные ${missing.join(", ")}. Уведомления о начале стрима выключены, постинг в Telegram работает.`,
+		);
+	}
+	return {
+		clientId: twitch.clientId as string,
+		clientSecret: twitch.clientSecret as string,
+		broadcasterUserId: twitch.broadcasterUserId as string,
+		eventSubSecret: twitch.eventSubSecret as string,
+	};
+}
 
 export function getApiClient(): ApiClient {
 	if (!client) {
-		const config = getConfig();
-		const provider = new AppTokenAuthProvider(
-			config.twitch.clientId,
-			config.twitch.clientSecret,
-		);
+		const { clientId, clientSecret } = requireTwitchConfig();
+		const provider = new AppTokenAuthProvider(clientId, clientSecret);
 		client = new ApiClient({ authProvider: provider });
 	}
 	return client;
@@ -24,8 +72,10 @@ export function verifyEventSubSignature(
 	signature: string,
 	rawBody: string,
 ): boolean {
-	const config = getConfig();
-	const digest = createHmac("sha256", config.twitch.eventSubSecret)
+	const secret = getConfig().twitch.eventSubSecret;
+	// Секрета нет — подпись проверить нечем, запрос не от Twitch. Fail closed.
+	if (!secret) return false;
+	const digest = createHmac("sha256", secret)
 		.update(messageId + timestamp + rawBody)
 		.digest("hex");
 	const expected = Buffer.from(`sha256=${digest}`);
@@ -40,12 +90,10 @@ function broadcasterUserIdOf(sub: { condition: unknown }): string | undefined {
 }
 
 async function getMine() {
-	const config = getConfig();
+	const { broadcasterUserId } = requireTwitchConfig();
 	const subs =
 		await getApiClient().eventSub.getSubscriptionsForType("stream.online");
-	return subs.data.filter(
-		(s) => broadcasterUserIdOf(s) === config.twitch.broadcasterUserId,
-	);
+	return subs.data.filter((s) => broadcasterUserIdOf(s) === broadcasterUserId);
 }
 
 /** Первая подписка stream.online на наш канал (любой статус) или null. */
@@ -73,16 +121,17 @@ export async function subscribeIfNeeded(): Promise<{
 	if (broken) await getApiClient().eventSub.deleteSubscription(broken.id);
 
 	const config = getConfig();
+	const { broadcasterUserId, eventSubSecret } = requireTwitchConfig();
 	const created = await getApiClient().eventSub.createSubscription(
 		"stream.online",
 		"1",
-		{ broadcaster_user_id: config.twitch.broadcasterUserId },
+		{ broadcaster_user_id: broadcasterUserId },
 		{
 			method: "webhook",
 			callback: `${config.baseUrl}/api/twitch`,
-			secret: config.twitch.eventSubSecret,
+			secret: eventSubSecret,
 		},
-		config.twitch.broadcasterUserId,
+		broadcasterUserId,
 	);
 	return { changed: true, id: created.id };
 }

@@ -1,16 +1,28 @@
 import { createHmac, randomUUID } from "node:crypto";
 import { getConfig } from "../src/config.js";
-import { getApiClient } from "../src/twitch.js";
+import {
+	getApiClient,
+	missingTwitchEnv,
+	twitchConfigured,
+} from "../src/twitch.js";
 
 async function main() {
+	if (!twitchConfigured()) {
+		console.error(
+			`Twitch не настроен: не заданы ${missingTwitchEnv().join(", ")}. Тест отменён.`,
+		);
+		process.exitCode = 1;
+		return;
+	}
+
 	const config = getConfig();
+	const broadcasterUserId = config.twitch.broadcasterUserId as string;
+	const eventSubSecret = config.twitch.eventSubSecret as string;
 
 	let login = "test";
 	let name = "тест";
 	try {
-		const user = await getApiClient().users.getUserById(
-			config.twitch.broadcasterUserId,
-		);
+		const user = await getApiClient().users.getUserById(broadcasterUserId);
 		if (user) {
 			login = user.name;
 			name = user.displayName;
@@ -30,7 +42,7 @@ async function main() {
 			type: "stream.online",
 			version: "1",
 			status: "enabled",
-			condition: { broadcaster_user_id: config.twitch.broadcasterUserId },
+			condition: { broadcaster_user_id: broadcasterUserId },
 			transport: {
 				method: "webhook",
 				callback: `${config.baseUrl}/api/twitch`,
@@ -39,13 +51,13 @@ async function main() {
 			cost: 0,
 		},
 		event: {
-			broadcaster_user_id: config.twitch.broadcasterUserId,
+			broadcaster_user_id: broadcasterUserId,
 			broadcaster_user_login: login,
 			broadcaster_user_name: name,
 		},
 	});
 
-	const expected = createHmac("sha256", config.twitch.eventSubSecret)
+	const expected = createHmac("sha256", eventSubSecret)
 		.update(messageId + timestamp + payload)
 		.digest("hex");
 

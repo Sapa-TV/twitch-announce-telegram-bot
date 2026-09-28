@@ -20,24 +20,20 @@ async function load(): Promise<{
 	twitch: typeof import("../src/twitch.js");
 	share: typeof import("../src/share.js");
 	assets: typeof import("../src/assets.js");
-	discord: typeof import("../src/discord.js");
 }> {
-	const [configModule, botModule, twitch, share, assets, discord] =
-		await Promise.all([
-			import("../src/config.js"),
-			import("../src/telegram.js"),
-			import("../src/twitch.js"),
-			import("../src/share.js"),
-			import("../src/assets.js"),
-			import("../src/discord.js"),
-		]);
+	const [configModule, botModule, twitch, share, assets] = await Promise.all([
+		import("../src/config.js"),
+		import("../src/telegram.js"),
+		import("../src/twitch.js"),
+		import("../src/share.js"),
+		import("../src/assets.js"),
+	]);
 	return {
 		appConfig: configModule.getConfig(),
 		bot: botModule.getBot(),
 		twitch,
 		share,
 		assets,
-		discord,
 	};
 }
 
@@ -47,9 +43,8 @@ export async function POST(request: Request): Promise<Response> {
 	let twitch: Awaited<ReturnType<typeof load>>["twitch"];
 	let share: Awaited<ReturnType<typeof load>>["share"];
 	let assets: Awaited<ReturnType<typeof load>>["assets"];
-	let discord: Awaited<ReturnType<typeof load>>["discord"];
 	try {
-		({ appConfig, bot, twitch, share, assets, discord } = await load());
+		({ appConfig, bot, twitch, share, assets } = await load());
 	} catch (err) {
 		return jsonError(err);
 	}
@@ -138,24 +133,17 @@ export async function POST(request: Request): Promise<Response> {
 			startedAt: stream?.startDate?.toISOString() ?? "—",
 		});
 		const image = await assets.randomStreamOnlineImage();
-		const discordAttachments = image
-			? [
-					{
-						data: image.data,
-						filename: image.filename,
-						contentType: image.contentType,
-					},
-				]
-			: [];
-		const [telegramResult, discordResult] = await Promise.allSettled([
-			share.postToChannel(bot.telegram, text, {
+		const telegramResult = await share
+			.postToChannel(bot.telegram, text, {
 				withImage: true,
 				image,
-			}),
-			discord.postToDiscord("stream", text, discordAttachments),
-		]);
+			})
+			.then(
+				(value) => ({ ok: true, value }) as const,
+				(reason) => ({ ok: false, reason }) as const,
+			);
 
-		if (telegramResult.status === "fulfilled") {
+		if (telegramResult.ok) {
 			console.log(
 				"stream.online posted to Telegram, message_id:",
 				telegramResult.value.message_id,
@@ -171,20 +159,6 @@ export async function POST(request: Request): Promise<Response> {
 			await notify(
 				`❌ Пост о стриме не опубликован в Telegram.\n\n${describeTelegramFailure(telegramResult.reason, `канал ${appConfig.telegram.channelId}`)}`,
 			);
-		}
-
-		if (discord.discordWebhookConfigured("stream")) {
-			if (discordResult.status === "fulfilled") {
-				console.log("stream.online posted to Discord");
-			} else {
-				console.error(
-					"stream.online Discord post failed:",
-					discordResult.reason,
-				);
-				await notify(
-					`❌ Пост о стриме не опубликован в Discord.\n\n${describeError(discordResult.reason)}`,
-				);
-			}
 		}
 	} catch (err) {
 		console.error("stream data fetch failed:", err);
