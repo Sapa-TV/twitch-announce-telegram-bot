@@ -1,22 +1,114 @@
 import { Markup } from "telegraf";
 import type { Telegram } from "telegraf";
-import type { InlineKeyboardButton, Message, MessageId } from "telegraf/types";
-import { getConfig } from "./config.js";
+import type { Message } from "telegraf/types";
+import { getConfig, type Button } from "./config.js";
 import { randomStreamOnlineImage } from "./assets.js";
 import type { StreamOnlineImage } from "./assets.js";
+import type { Draft } from "./drafts.js";
+import type { PostType } from "./postTypes.js";
+
+/** Лимиты Telegram Bot API. */
+const TEXT_LIMIT = 4096;
+const CAPTION_LIMIT = 1024;
 
 export function inlineKeyboard() {
 	const config = getConfig();
-	const perRow = 2;
-	const rows: InlineKeyboardButton[][] = [];
-	for (let i = 0; i < config.buttons.length; i += perRow) {
-		rows.push(
-			config.buttons
-				.slice(i, i + perRow)
-				.map((b) => Markup.button.url(b.label, b.url)),
-		);
+	return Markup.inlineKeyboard(chunk(config.buttons.map(toUrlButton)));
+}
+
+/** Кнопки поста по типу: лейблы резолвятся в общий список `config.buttons`. */
+export function postTypeKeyboard(type: PostType) {
+	const config = getConfig();
+	const byLabel = new Map(config.buttons.map((b) => [b.label, b]));
+	const picked: Button[] = [];
+	for (const label of type.buttons) {
+		const button = byLabel.get(label);
+		if (button) {
+			picked.push(button);
+		} else {
+			console.warn(`post type: no button labeled "${label}"`);
+		}
 	}
-	return Markup.inlineKeyboard(rows);
+	// Ни один лейбл не нашёлся — лучше постить с обычными кнопками канала,
+	// чем совсем без них.
+	if (picked.length === 0) {
+		console.warn("post type: no buttons resolved, using channel default");
+		return inlineKeyboard();
+	}
+	return Markup.inlineKeyboard(chunk(picked.map(toUrlButton)));
+}
+
+function toUrlButton(button: Button) {
+	return Markup.button.url(button.label, button.url);
+}
+
+function chunk<T>(items: T[], perRow = 2): T[][] {
+	const rows: T[][] = [];
+	for (let i = 0; i < items.length; i += perRow) {
+		rows.push(items.slice(i, i + perRow));
+	}
+	return rows;
+}
+
+/** Дописывает подпись типа поста в конец текста, укладываясь в лимит Telegram. */
+export function appendSignature(
+	body: string,
+	signature: string,
+	limit: number,
+): string {
+	const suffix = `\n\n${signature}`;
+	const text = body.trim();
+	if (!text) return signature.slice(0, limit);
+	const room = limit - suffix.length;
+	if (room <= 0) return signature.slice(0, limit);
+	if (text.length <= room) return `${text}${suffix}`;
+	return `${text.slice(0, Math.max(0, room - 1)).trimEnd()}…${suffix}`;
+}
+
+/**
+ * Публикует черновик в канал с кнопками и подписью выбранного типа.
+ * Текст идёт через sendMessage, медиа — через copyMessage (файл не перезаливаем).
+ */
+export async function publishDraft(
+	telegram: Telegram,
+	draft: Draft,
+	type: PostType,
+): Promise<number | undefined> {
+	const config = getConfig();
+	const replyMarkup = { reply_markup: postTypeKeyboard(type).reply_markup };
+
+	if (draft.media === "none") {
+		const text = appendSignature(draft.body, type.signature, TEXT_LIMIT);
+		const sent = await telegram.sendMessage(
+			config.telegram.channelId,
+			text,
+			replyMarkup,
+		);
+		return sent.message_id;
+	}
+
+	if (draft.media === "captionable") {
+		const caption = appendSignature(draft.body, type.signature, CAPTION_LIMIT);
+		const copied = await telegram.copyMessage(
+			config.telegram.channelId,
+			draft.chatId,
+			draft.messageId,
+			{ ...replyMarkup, caption },
+		);
+		return copied.message_id;
+	}
+
+	// Стикер или голосовое: caption у Telegram не поддерживается, копируем как есть.
+	console.log(
+		"media without caption support, post published without signature",
+	);
+	const copied = await telegram.copyMessage(
+		config.telegram.channelId,
+		draft.chatId,
+		draft.messageId,
+		replyMarkup,
+	);
+	return copied.message_id;
 }
 
 export async function postToChannel(
@@ -46,20 +138,6 @@ export async function postToChannel(
 		);
 	}
 	return telegram.sendMessage(config.telegram.channelId, text, replyMarkup);
-}
-
-export async function copyMessageToChannel(
-	telegram: Telegram,
-	fromChatId: number,
-	messageId: number,
-): Promise<MessageId> {
-	const config = getConfig();
-	return telegram.copyMessage(
-		config.telegram.channelId,
-		fromChatId,
-		messageId,
-		{ reply_markup: inlineKeyboard().reply_markup },
-	);
 }
 
 /** Сообщение всем админам (ALLOWED_USER_IDS) в личку. Ничего не бросает — уведомления best-effort. */

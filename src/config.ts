@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { postTypes, type PostTypesConfig } from "./postTypes.js";
 
 export type Button = { label: string; url: string };
 
@@ -18,8 +19,16 @@ export type AppConfig = {
 		broadcasterUserId?: string;
 		eventSubSecret?: string;
 	};
+	// Redis (Upstash) опционален: нужен, чтобы черновик неопубликованного поста
+	// переживал перезапуск serverless-функции. Без него черновик живёт в памяти.
+	redis: {
+		url?: string;
+		token?: string;
+	};
 	baseUrl: string;
 	buttons: Button[];
+	// Типы постов, окна времени и тексты вопросов живут в src/postTypes.ts.
+	posts: PostTypesConfig;
 	templates: {
 		streamOnline: string;
 	};
@@ -80,8 +89,19 @@ function buildConfig(): AppConfig {
 			broadcasterUserId: optionalEnv("TWITCH_BROADCASTER_USER_ID"),
 			eventSubSecret: optionalEnv("EVENTSUB_SECRET"),
 		},
+		// Имена переменных у интеграции Redis на Vercel неизвестны наверняка:
+		// часть ставит UPSTASH_REDIS_REST_*, часть — KV_REST_API_* (так их
+		// называл @vercel/kv, который тоже был поверх Upstash). Берём обе.
+		redis: {
+			url:
+				optionalEnv("UPSTASH_REDIS_REST_URL") ?? optionalEnv("KV_REST_API_URL"),
+			token:
+				optionalEnv("UPSTASH_REDIS_REST_TOKEN") ??
+				optionalEnv("KV_REST_API_TOKEN"),
+		},
 		baseUrl,
 		buttons,
+		posts: postTypes,
 		templates: {
 			// сообщение из бота (1:1 как было), без шаблонизации
 			streamOnline: "🎬 {channel} запустила стрим, не пропусти!\n\n{title}",

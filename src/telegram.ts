@@ -3,7 +3,10 @@ import { message } from "telegraf/filters";
 import type { Message } from "telegraf/types";
 import { getConfig } from "./config.js";
 import { describeTelegramFailure } from "./errors.js";
-import { copyMessageToChannel, notifyAdmins, postToChannel } from "./share.js";
+import { dropDraft, peekDraft, saveDraft, type MediaKind } from "./drafts.js";
+import type { PostTypeId } from "./postTypes.js";
+import { notifyAdmins, publishDraft, renderTemplate } from "./share.js";
+import { findWindow, hourInTimeZone } from "./time.js";
 import {
 	deleteEventSub,
 	getEventSubStatus,
@@ -25,10 +28,38 @@ const FORWARDABLE_MEDIA_KEYS = [
 	"voice",
 ] as const;
 
+/** Медиа, у которых в Telegram есть поле caption — в них впишется подпись. */
+const CAPTIONABLE_MEDIA_KEYS = [
+	"animation",
+	"audio",
+	"document",
+	"photo",
+	"video",
+	"video_note",
+] as const;
+
+/** Префикс callback_data нового флоу. Не пересекается с `twitch_*`. */
+const POST_ACTION_PREFIX = "post:";
+const CANCEL_TYPE = "cancel" as const;
+
 type ActionRun = () => Promise<string>;
 
 function hasForwardableMedia(message: Message): boolean {
 	return FORWARDABLE_MEDIA_KEYS.some((key) => key in message);
+}
+
+function mediaKindOf(message: Message): MediaKind {
+	if (!hasForwardableMedia(message)) return "none";
+	return CAPTIONABLE_MEDIA_KEYS.some((key) => key in message)
+		? "captionable"
+		: "plain";
+}
+
+/** Текст сообщения или подпись к медиа — то, что попадёт в пост. */
+function bodyOf(message: Message): string {
+	if ("text" in message) return message.text;
+	if ("caption" in message && message.caption) return message.caption;
+	return "";
 }
 
 /** Отвечает на нажатие кнопки: показывает и результат, и понятную причину сбоя. */
@@ -46,6 +77,130 @@ async function runAction(
 			.reply(`❌ ${title}: не получилось\n${describeTelegramFailure(err)}`)
 			.catch(() => undefined);
 	}
+}
+
+/**
+ * Спрашивает, что за пост прислали. Список кнопок зависит от текущего часа
+ * МСК: попали в стримовое окно — 2 варианта, не попали — 3.
+ */
+async function askPostType(
+	ctx: Context,
+	source: {
+		userId: number;
+		chatId: number;
+		messageId: number;
+		body: string;
+		media: MediaKind;
+	},
+): Promise<void> {
+	const config = getConfig();
+	const posts = config.posts;
+	const hour = hourInTimeZone(new Date(), posts.timezone);
+	const window = findWindow(hour, posts.windows);
+
+	const options: PostTypeId[] = window
+		? [window.suggestedType, ...posts.questions.inWindowExtra]
+		: posts.questions.outOfWindowOptions;
+	const label = window ? posts.types[window.suggestedType].label : "";
+	const question = renderTemplate(
+		window ? posts.questions.inWindow : posts.questions.outOfWindow,
+		{
+			hour: String(hour),
+			from: window ? String(window.from) : "",
+			to: window ? String(window.to) : "",
+			label,
+		},
+	);
+
+	const keyboard = Markup.inlineKeyboard([
+		options.map((id) =>
+			Markup.button.callback(
+				posts.types[id].label,
+				`${POST_ACTION_PREFIX}${id}`,
+			),
+		),
+		[Markup.button.callback("Отмена", `${POST_ACTION_PREFIX}${CANCEL_TYPE}`)],
+	]);
+
+	const sent = await ctx.reply(question, keyboard);
+	await saveDraft({
+		...source,
+		questionChatId: sent.chat.id,
+		questionMessageId: sent.message_id,
+		createdAt: Date.now(),
+	});
+}
+
+/** Публикует сохранённый черновик в канал и дописывает в вопрос итог. */
+async function publishAndConfirm(
+	ctx: Context,
+	userId: number,
+	typeId: string,
+): Promise<void> {
+	const config = getConfig();
+	const posts = config.posts;
+	const draft = await peekDraft(userId);
+
+	if (!draft) {
+		const text = renderTemplate(posts.replies.expired, {
+			minutes: String(Math.round(posts.draftTtlMs / 60000)),
+		});
+		await ctx.answerCbQuery(text).catch(() => undefined);
+		await replaceQuestion(ctx, text);
+		return;
+	}
+
+	if (typeId === CANCEL_TYPE) {
+		await dropDraft(userId);
+		await ctx.answerCbQuery("Отменено").catch(() => undefined);
+		await replaceQuestion(ctx, posts.replies.cancelled);
+		return;
+	}
+
+	const type = posts.types[typeId as PostTypeId];
+	if (!type) {
+		await ctx
+			.answerCbQuery(`Неизвестный тип поста: ${typeId}`)
+			.catch(() => undefined);
+		return;
+	}
+
+	await ctx.answerCbQuery("Публикую…").catch(() => undefined);
+	try {
+		const messageId = await publishDraft(ctx.telegram, draft, type);
+		console.log(
+			"post published to Telegram, type:",
+			typeId,
+			"message_id:",
+			messageId,
+		);
+	} catch (err) {
+		// Черновик оставляем — по той же кнопке можно повторить.
+		console.error("post publish failed:", err);
+		const text = renderTemplate(posts.replies.failed, {
+			label: type.label,
+			error: describeTelegramFailure(err, `канал ${config.telegram.channelId}`),
+		});
+		await ctx.answerCbQuery("Не получилось").catch(() => undefined);
+		await replaceQuestion(ctx, text);
+		return;
+	}
+
+	await dropDraft(userId);
+	await replaceQuestion(
+		ctx,
+		renderTemplate(posts.replies.published, { label: type.label }),
+	);
+	if (config.telegram.replyToAuthor) {
+		await ctx.reply("Опубликовано").catch(() => undefined);
+	}
+}
+
+/** Вопрос живёт в личке — переписываем его вместо нового сообщения. */
+async function replaceQuestion(ctx: Context, text: string): Promise<void> {
+	await ctx
+		.editMessageText(text)
+		.catch(() => ctx.reply(text).catch(() => undefined));
 }
 
 export function getBot(): Telegraf {
@@ -69,31 +224,36 @@ function createBot(): Telegraf {
 		if (!text && !hasForwardableMedia(ctx.message)) return next();
 
 		try {
-			const hasMedia = hasForwardableMedia(ctx.message);
-			if (hasMedia) {
-				await copyMessageToChannel(
-					bot.telegram,
-					ctx.chat.id,
-					ctx.message.message_id,
-				);
-			} else {
-				await postToChannel(bot.telegram, text ?? "");
-			}
+			// Ничего не постим сразу — сначала спрашиваем тип, он решает
+			// подпись и кнопки под постом.
+			await askPostType(ctx, {
+				userId: ctx.from.id,
+				chatId: ctx.chat.id,
+				messageId: ctx.message.message_id,
+				body: bodyOf(ctx.message),
+				media: mediaKindOf(ctx.message),
+			});
 		} catch (err) {
-			// Сбой постинга — отдельная ветка: автор сразу получает причину
-			// (например «chat not found»), а не общий стек из bot.catch.
-			console.error("manual Telegram post failed:", err);
+			// Не смогли даже спросить — автору сразу причина, а не стек из bot.catch.
+			console.error("post type question failed:", err);
 			await ctx
 				.reply(
-					`❌ Не опубликовано в Telegram:\n${describeTelegramFailure(err, `канал ${config.telegram.channelId}`)}`,
+					`❌ Не удалось задать вопрос о типе поста:\n${describeTelegramFailure(err)}`,
 				)
+				.catch(() => undefined);
+		}
+	});
+
+	bot.action(new RegExp(`^${POST_ACTION_PREFIX}(.+)$`), async (ctx) => {
+		const [, typeId] = ctx.match;
+		const userId = ctx.from?.id;
+		if (!userId) {
+			await ctx
+				.answerCbQuery("Не удалось определить автора")
 				.catch(() => undefined);
 			return;
 		}
-
-		if (config.telegram.replyToAuthor) {
-			await ctx.reply("Опубликовано").catch(() => undefined);
-		}
+		await publishAndConfirm(ctx, userId, typeId);
 	});
 
 	bot.command("menu", async (ctx) => {

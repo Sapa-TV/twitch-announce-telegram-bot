@@ -34,6 +34,7 @@
 	"dependencies": {
 		"@twurple/api": "^8.2.0",
 		"@twurple/auth": "^8.2.0",
+		"@upstash/redis": "^1.39.0",
 		"telegraf": "^4.16.3"
 	},
 	"devDependencies": {

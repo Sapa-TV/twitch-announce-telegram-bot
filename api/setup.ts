@@ -9,12 +9,14 @@ const TELEGRAM_API = "https://api.telegram.org";
 async function load(): Promise<{
 	appConfig: AppConfig;
 	twitch: typeof import("../src/twitch.js");
+	drafts: typeof import("../src/drafts.js");
 }> {
-	const [{ getConfig }, twitch] = await Promise.all([
+	const [{ getConfig }, twitch, drafts] = await Promise.all([
 		import("../src/config.js"),
 		import("../src/twitch.js"),
+		import("../src/drafts.js"),
 	]);
-	return { appConfig: getConfig(), twitch };
+	return { appConfig: getConfig(), twitch, drafts };
 }
 
 async function fetchJson(url: string, init?: RequestInit): Promise<unknown> {
@@ -42,8 +44,9 @@ async function setTelegramWebhook(appConfig: AppConfig) {
 export async function GET(): Promise<Response> {
 	let appConfig: AppConfig;
 	let twitch: Awaited<ReturnType<typeof load>>["twitch"];
+	let drafts: Awaited<ReturnType<typeof load>>["drafts"];
 	try {
-		({ appConfig, twitch } = await load());
+		({ appConfig, twitch, drafts } = await load());
 	} catch (err) {
 		return jsonError(err);
 	}
@@ -57,6 +60,7 @@ export async function GET(): Promise<Response> {
 			twitchMissingEnv: twitch.missingTwitchEnv(),
 			broadcasterUserId: appConfig.twitch.broadcasterUserId ?? null,
 		},
+		redis: await drafts.pingRedis(),
 		telegramWebhook: null as unknown,
 		subscription: null as unknown,
 	};
