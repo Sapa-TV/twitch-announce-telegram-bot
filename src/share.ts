@@ -1,11 +1,10 @@
 import { Markup } from "telegraf";
 import type { Telegram } from "telegraf";
 import type { Message } from "telegraf/types";
-import { getConfig, type Button } from "./config.js";
+import { getConfig, type Button, type PostTypeId } from "./config.js";
 import { randomStreamOnlineImage } from "./assets.js";
 import type { StreamOnlineImage } from "./assets.js";
 import type { Draft } from "./drafts.js";
-import type { PostType } from "./postTypes.js";
 
 /** Лимиты Telegram Bot API. */
 const TEXT_LIMIT = 4096;
@@ -16,23 +15,14 @@ export function inlineKeyboard() {
 	return Markup.inlineKeyboard(chunk(config.buttons.map(toUrlButton)));
 }
 
-/** Кнопки поста по типу: лейблы резолвятся в общий список `config.buttons`. */
-export function postTypeKeyboard(type: PostType) {
+export function postTypeKeyboard(typeId: PostTypeId) {
 	const config = getConfig();
-	const byLabel = new Map(config.buttons.map((b) => [b.label, b]));
-	const picked: Button[] = [];
-	for (const label of type.buttons) {
-		const button = byLabel.get(label);
-		if (button) {
-			picked.push(button);
-		} else {
-			console.warn(`post type: no button labeled "${label}"`);
-		}
-	}
-	// Ни один лейбл не нашёлся — лучше постить с обычными кнопками канала,
-	// чем совсем без них.
+	const picked = config.posts.types[typeId]?.buttons ?? [];
+	// Пост без единой кнопки хуже, чем пост с кнопками канала.
 	if (picked.length === 0) {
-		console.warn("post type: no buttons resolved, using channel default");
+		console.warn(
+			`post type: no buttons for "${typeId}", using channel default`,
+		);
 		return inlineKeyboard();
 	}
 	return Markup.inlineKeyboard(chunk(picked.map(toUrlButton)));
@@ -56,9 +46,10 @@ export function appendSignature(
 	signature: string,
 	limit: number,
 ): string {
-	const suffix = `\n\n${signature}`;
 	const text = body.trim();
-	if (!text) return signature.slice(0, limit);
+	if (!signature) return text;
+	if (!text) return signature;
+	const suffix = `\n\n${signature}`;
 	const room = limit - suffix.length;
 	if (room <= 0) return signature.slice(0, limit);
 	if (text.length <= room) return `${text}${suffix}`;
@@ -72,10 +63,11 @@ export function appendSignature(
 export async function publishDraft(
 	telegram: Telegram,
 	draft: Draft,
-	type: PostType,
+	typeId: PostTypeId,
 ): Promise<number | undefined> {
 	const config = getConfig();
-	const replyMarkup = { reply_markup: postTypeKeyboard(type).reply_markup };
+	const type = config.posts.types[typeId];
+	const replyMarkup = { reply_markup: postTypeKeyboard(typeId).reply_markup };
 
 	if (draft.media === "none") {
 		const text = appendSignature(draft.body, type.signature, TEXT_LIMIT);
@@ -93,7 +85,8 @@ export async function publishDraft(
 			config.telegram.channelId,
 			draft.chatId,
 			draft.messageId,
-			{ ...replyMarkup, caption },
+			// Пустой caption Telegram не примет — оставляем исходный.
+			caption ? { ...replyMarkup, caption } : replyMarkup,
 		);
 		return copied.message_id;
 	}

@@ -1,4 +1,4 @@
-import type { TimeWindow } from "./postTypes.js";
+import type { TimeWindow } from "./config.js";
 
 const formatters = new Map<string, Intl.DateTimeFormat>();
 

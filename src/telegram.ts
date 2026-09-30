@@ -4,7 +4,7 @@ import type { Message } from "telegraf/types";
 import { getConfig } from "./config.js";
 import { describeTelegramFailure } from "./errors.js";
 import { dropDraft, peekDraft, saveDraft, type MediaKind } from "./drafts.js";
-import type { PostTypeId } from "./postTypes.js";
+import type { PostTypeId } from "./config.js";
 import { notifyAdmins, publishDraft, renderTemplate } from "./share.js";
 import { findWindow, hourInTimeZone } from "./time.js";
 import {
@@ -55,7 +55,7 @@ function mediaKindOf(message: Message): MediaKind {
 		: "plain";
 }
 
-/** Текст сообщения или подпись к медиа — то, что попадёт в пост. */
+/** То, что попадёт в пост. */
 function bodyOf(message: Message): string {
 	if ("text" in message) return message.text;
 	if ("caption" in message && message.caption) return message.caption;
@@ -99,9 +99,9 @@ async function askPostType(
 	const window = findWindow(hour, posts.windows);
 
 	const options: PostTypeId[] = window
-		? [window.suggestedType, ...posts.questions.inWindowExtra]
+		? [window.suggest, ...posts.questions.inWindowExtra]
 		: posts.questions.outOfWindowOptions;
-	const label = window ? posts.types[window.suggestedType].label : "";
+	const label = window ? posts.types[window.suggest].label : "";
 	const question = renderTemplate(
 		window ? posts.questions.inWindow : posts.questions.outOfWindow,
 		{
@@ -167,7 +167,11 @@ async function publishAndConfirm(
 
 	await ctx.answerCbQuery("Публикую…").catch(() => undefined);
 	try {
-		const messageId = await publishDraft(ctx.telegram, draft, type);
+		const messageId = await publishDraft(
+			ctx.telegram,
+			draft,
+			typeId as PostTypeId,
+		);
 		console.log(
 			"post published to Telegram, type:",
 			typeId,
@@ -223,14 +227,23 @@ function createBot(): Telegraf {
 		if (text?.startsWith("/")) return next();
 		if (!text && !hasForwardableMedia(ctx.message)) return next();
 
+		const body = bodyOf(ctx.message);
+		// Медиа без подписи само по себе не пусто, а вот текст из пробелов в
+		// канал не отправишь — Telegram вернёт 400 на пустой text.
+		if (body.trim() === "" && !hasForwardableMedia(ctx.message)) {
+			await ctx
+				.reply("Пустое сообщение — публиковать нечего.")
+				.catch(() => undefined);
+			return;
+		}
+
 		try {
-			// Ничего не постим сразу — сначала спрашиваем тип, он решает
-			// подпись и кнопки под постом.
+			// Сначала вопрос, публикация — только после выбора типа.
 			await askPostType(ctx, {
 				userId: ctx.from.id,
 				chatId: ctx.chat.id,
 				messageId: ctx.message.message_id,
-				body: bodyOf(ctx.message),
+				body,
 				media: mediaKindOf(ctx.message),
 			});
 		} catch (err) {

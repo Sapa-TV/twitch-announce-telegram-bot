@@ -13,9 +13,9 @@ export type MediaKind =
 
 export type Draft = {
 	userId: number;
-	/** Чат, откуда пришло сообщение — оттуда копируем медиа в канал. */
+	/** Отсюда копируем медиа в канал. */
 	chatId: number;
-	/** id сообщения в этом чате — его копируем. */
+	/** id сообщения в этом чате. */
 	messageId: number;
 	/** Текст сообщения или подпись к медиа. */
 	body: string;
@@ -44,7 +44,6 @@ function getClient(): Redis | null {
 		const { url, token } = getConfig().redis;
 		client = url && token ? new Redis({ url, token }) : null;
 		if (client) {
-			// Какая из пар переменных сработала — сразу видно в логах.
 			const names = process.env.UPSTASH_REDIS_REST_URL
 				? "UPSTASH_REDIS_REST_*"
 				: "KV_REST_API_*";
@@ -58,8 +57,9 @@ function getClient(): Redis | null {
 	return client;
 }
 
-// Страховка на случай недоступного Redis: тогда поведение как раньше — в памяти
-// процесса. Обращаемся к ней только когда Redis не ответил.
+// План Б, если Redis не ответил: держим черновик в памяти процесса. К памяти
+// обращаемся только после неудачи в Redis, чтобы не вычитывать удалённое вслед
+// за публикацией на другом инстансе.
 const memory = new Map<number, Draft>();
 
 function isAlive(draft: Draft): boolean {
@@ -116,7 +116,7 @@ export async function dropDraft(userId: number): Promise<void> {
 	}
 }
 
-/** Живость хранилища для /api/setup — ничего не бросает, всегда отвечает. */
+/** Для /api/setup — не бросает, всегда отвечает. */
 export async function pingRedis(): Promise<{
 	configured: boolean;
 	result: string;
